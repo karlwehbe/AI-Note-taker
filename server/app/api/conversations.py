@@ -110,13 +110,16 @@ def save_draft(conversation_id: uuid.UUID, payload: DraftIn, db: Session = Depen
 @router.post("/conversations/{conversation_id}/messages", response_model=MessageTurnOut)
 async def send_message(
     conversation_id: uuid.UUID,
-    # Audio is optional — omitted entirely for a typed text message.
+    # Audio is optional — required for file uploads (batch STT). Live
+    # recordings and typed messages omit it.
     file: UploadFile | None = File(None),
-    # For audio: set by the client when it was already transcribed live via
-    # the /ws/transcribe Deepgram streaming proxy, skipping a redundant
-    # batch transcription call. For a typed message (no file), this IS the
-    # message content directly — nothing gets transcribed.
+    # Live recording / typed text: the message content. File uploads leave
+    # this unset so the server runs batch transcription on `file`.
     transcript: str | None = Form(None),
+    # Optional label without audio bytes — live send uses "recording.webm"
+    # so the turn is distinguishable from typed text. Ignored when `file`
+    # is present (the upload's own name wins).
+    filename: str | None = Form(None),
     settings: Settings = Depends(get_settings),
     db: Session = Depends(get_db),
 ) -> MessageTurnOut:
@@ -127,21 +130,20 @@ async def send_message(
         f"audio file {file.filename!r}" if file is not None else "text",
     )
 
-    filename: str | None = None
+    stored_filename: str | None = None
     if file is not None:
         audio_bytes = await file.read()
         if not audio_bytes:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty file")
         if len(audio_bytes) > MAX_AUDIO_BYTES:
             raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="File too large")
-        if transcript is None:
-            logger.info("[%s] transcribing %d bytes of audio", conversation_id, len(audio_bytes))
-            transcript = await transcribe_audio(audio_bytes, settings)
-            logger.info("[%s] transcription complete (%d chars)", conversation_id, len(transcript))
-        else:
-            logger.info("[%s] using transcript already captured live (%d chars)", conversation_id, len(transcript))
-        filename = file.filename or "recording.webm"
-    elif not transcript:
+        logger.info("[%s] transcribing %d bytes of audio", conversation_id, len(audio_bytes))
+        transcript = await transcribe_audio(audio_bytes, settings)
+        logger.info("[%s] transcription complete (%d chars)", conversation_id, len(transcript))
+        stored_filename = file.filename or "recording.webm"
+    elif transcript:
+        stored_filename = filename
+    else:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Either file or transcript is required")
 
     # Silence (or a file with no discernible speech) transcribes to an empty
@@ -161,7 +163,7 @@ async def send_message(
         conversation_id=conversation.id,
         role="user",
         content=transcript,
-        filename=filename,
+        filename=stored_filename,
     )
     db.add(user_message)
     # Persist the user turn immediately so a crash mid-generation doesn't lose

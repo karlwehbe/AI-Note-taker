@@ -13,9 +13,9 @@ import { Markdown, pendingMathItalicHtml, splitIncompleteMath } from "@/componen
 import type { Message } from "@/lib/api"
 import { useStreamReveal } from "@/lib/use-stream-reveal"
 
-// Recordings are also given a filename server-side ("recording.webm",
-// hardcoded client-side when sending one) — only a genuine upload should
-// render as a file chip instead of its transcript text.
+// Recordings store filename "recording.webm" as metadata (no audio upload)
+// — only a genuine file upload should render as a file chip instead of its
+// transcript text.
 function isFileAttachment(message: Message) {
   return Boolean(message.filename && message.filename !== "recording.webm")
 }

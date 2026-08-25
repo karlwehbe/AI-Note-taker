@@ -119,6 +119,23 @@ class TestSendMessage:
         assert body["assistant_message"]["role"] == "assistant"
         assert db.query(Message).count() == 2
 
+    def test_live_recording_sets_filename_without_audio_file(
+        self, client: TestClient, db: Session, stub_llm
+    ) -> None:
+        # Live path: transcript + filename metadata, no multipart file.
+        stub_llm()
+        conversation = _make_conversation(db)
+
+        response = client.post(
+            f"/conversations/{conversation.id}/messages",
+            data={"transcript": "lecture content", "filename": "recording.webm"},
+        )
+
+        assert response.status_code == 200
+        user = db.query(Message).filter_by(role="user").one()
+        assert user.content == "lecture content"
+        assert user.filename == "recording.webm"
+
     def test_notes_are_persisted_when_the_router_says_so(self, client: TestClient, db: Session, stub_llm) -> None:
         stub_llm()
         conversation = _make_conversation(db)

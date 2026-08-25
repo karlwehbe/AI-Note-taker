@@ -228,49 +228,32 @@ export function ChatComposer({
     }
   }
 
-  // Shared by the normal Send click (audio already attached) and by
-  // stopAndSend (recording finishes and sends in one action).
-  // explicitConversationId skips the create-if-needed lookup below — used by
-  // the recording path, which already resolved (and possibly created) its
-  // conversation id via RecordingContext.
-  async function finalizeSend(
-    audio: Blob | File,
-    name: string,
-    transcript: string | undefined,
-    explicitConversationId?: string
-  ) {
+  // File-upload send — audio bytes only; server batch-transcribes.
+  async function finalizeSend(audio: Blob | File, name: string) {
     setSubmitting(true)
     setError(null)
-    // name is only ever a meaningful placeholder here for a real file
-    // attachment (e.g. "lecture.mp3") — stopAndSend guarantees transcript is
-    // non-empty before calling this for a recording, so that's the only
-    // remaining case where the fallback applies.
-    // Recordings show the live transcript; uploads show the file chip
-    // immediately (transcript fills in after the server transcribes).
+    // Uploads show the file chip immediately (transcript fills in after
+    // the server transcribes).
     onPendingMessage?.({
       id: "pending",
       role: "user",
-      content: transcript ?? "",
-      filename: name !== "recording.webm" ? name : null,
+      content: "",
+      filename: name,
       created_at: new Date().toISOString(),
     })
-    // Captured before clearing so a failed send can put it back — losing a
-    // long transcript because the AI call failed is not acceptable.
     const attachedFile = file
     setFile(null)
     setText("")
     setRestoredDraft("")
-    let targetId = explicitConversationId ?? conversationId ?? createdConversationId
+    let targetId = conversationId ?? createdConversationId
     try {
       if (!targetId) {
-        // Create before the AI call so the sidebar + title bar show
-        // "New conversation" while generation is in flight.
         const conversation = await api.createConversation()
         targetId = conversation.id
         setCreatedConversationId(conversation.id)
         await refetch()
       }
-      const turn = await api.sendMessage(targetId, audio, name, transcript)
+      const turn = await api.sendMessage(targetId, audio, name)
       await refetch()
 
       if (!conversationId) {
@@ -283,17 +266,48 @@ export function ChatComposer({
       if (!aliveRef.current) return
       setError(err instanceof Error ? err.message : "Something went wrong")
       onPendingMessage?.(null)
-      // Restore the content so nothing is lost. A recording's audio blob is
-      // already gone by this point, but the transcript is what actually gets
-      // sent (the server skips re-transcription when one is supplied), so
-      // resending it as text produces the same notes. The server rolls back
-      // the user row on AI failure, so a retry won't duplicate. Stay on this
-      // page so the restored composer state isn't lost to a remount.
-      if (attachedFile) {
-        setFile(attachedFile)
-      } else if (transcript) {
-        setRestoredDraft(transcript)
+      if (attachedFile) setFile(attachedFile)
+    } finally {
+      if (aliveRef.current) setSubmitting(false)
+    }
+  }
+
+  // Live recording send — transcript already captured via /ws/transcribe;
+  // no audio bytes. filename marks the turn as a recording in the DB.
+  async function finalizeSendLive(
+    transcript: string,
+    explicitConversationId: string,
+  ) {
+    setSubmitting(true)
+    setError(null)
+    onPendingMessage?.({
+      id: "pending",
+      role: "user",
+      content: transcript,
+      filename: null,
+      created_at: new Date().toISOString(),
+    })
+    setFile(null)
+    setText("")
+    setRestoredDraft("")
+    let targetId = explicitConversationId
+    try {
+      const turn = await api.sendLiveRecordingMessage(targetId, transcript)
+      await refetch()
+
+      if (!conversationId) {
+        openNewConversationIfStillOnNewChat(targetId)
+      } else {
+        onPendingMessage?.(null)
+        onSent(turn)
       }
+    } catch (err) {
+      if (!aliveRef.current) return
+      setError(err instanceof Error ? err.message : "Something went wrong")
+      onPendingMessage?.(null)
+      // Restore transcript into the composer for retry. Server rolls back the
+      // user row on AI failure so a retry won't duplicate.
+      setRestoredDraft(transcript)
     } finally {
       if (aliveRef.current) setSubmitting(false)
     }
@@ -349,12 +363,12 @@ export function ChatComposer({
   async function submit() {
     const typedText = text.trim()
     if (file) {
-      await finalizeSend(file, file.name, undefined)
+      await finalizeSend(file, file.name)
     } else if (typedText) {
       await finalizeSendText(typedText)
     } else if (restoredDraft.trim()) {
       // Draft-only send — a transcript recovered after a reload, with no
-      // audio blob left in memory to attach.
+      // live session left to continue.
       await finalizeSendText(restoredDraft.trim(), true)
     }
   }
@@ -392,7 +406,7 @@ export function ChatComposer({
       }
       return
     }
-    await finalizeSend(result.blob, "recording.webm", result.transcript, result.conversationId)
+    await finalizeSendLive(result.transcript, result.conversationId)
   }
 
   const isRecordingHere = recording.isRecording && recording.isHostViewingRecording

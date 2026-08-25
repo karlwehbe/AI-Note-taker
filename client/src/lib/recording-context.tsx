@@ -13,7 +13,7 @@ import { useConversationsContext } from "@/lib/conversations-context"
 
 export type Source = "mic" | "system"
 
-type FinalizedRecording = { blob: Blob; transcript: string; conversationId: string }
+type FinalizedRecording = { transcript: string; conversationId: string }
 
 type RecordingContextValue = {
   isRecording: boolean
@@ -34,8 +34,8 @@ type RecordingContextValue = {
   // recovered after a full page reload) instead of starting from empty.
   startRecording: (conversationId: string | null, source: Source, seedTranscript?: string) => Promise<void>
   togglePause: () => void
-  // Stops the recorder and resolves once the final blob/transcript are
-  // ready — the caller (ChatComposer) does the actual api.sendMessage.
+  // Stops the recorder and resolves once the final transcript is ready —
+  // the caller (ChatComposer) does the actual api.sendLiveRecordingMessage.
   stopAndFinalize: () => Promise<FinalizedRecording | null>
   // Throws away the in-progress recording — no send, no leftover draft (and
   // no leftover empty conversation if it was created just for this session).
@@ -136,7 +136,6 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
   const [nullHostRetired, setNullHostRetired] = useState(false)
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
-  const chunksRef = useRef<Blob[]>([])
   const wsRef = useRef<WebSocket | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const finalTranscriptRef = useRef("")
@@ -301,15 +300,14 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
       })
 
       const recorder = new MediaRecorder(stream)
-      chunksRef.current = []
+      // Chunks go only to Deepgram live — no in-memory blob for upload.
+      // File uploads are a separate path that attaches a user-picked file.
       recorder.ondataavailable = (e) => {
-        chunksRef.current.push(e.data)
         if (ws.readyState === WebSocket.OPEN && e.data.size > 0) {
           ws.send(e.data)
         }
       }
       recorder.onstop = () => {
-        const blob = new Blob(chunksRef.current, { type: recorder.mimeType })
         streamRef.current?.getTracks().forEach((track) => track.stop())
         stopAudioLevelMeter()
         // Give Deepgram a moment to flush its last final result before we
@@ -329,7 +327,7 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
         // stop — Deepgram may not have finalized the last word(s) yet, and
         // that text was previously dropped outright rather than sent.
         const transcript = [finalTranscriptRef.current, interimTranscriptRef.current].filter(Boolean).join(" ")
-        resolve?.(finalConversationId ? { blob, transcript, conversationId: finalConversationId } : null)
+        resolve?.(finalConversationId ? { transcript, conversationId: finalConversationId } : null)
       }
       recorder.start(250)
       mediaRecorderRef.current = recorder

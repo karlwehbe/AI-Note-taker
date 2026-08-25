@@ -83,12 +83,25 @@ export const api = {
   createConversation: () => request<Conversation>("/conversations", { method: "POST" }),
   getConversation: (id: string) => request<ConversationDetail>(`/conversations/${id}`),
   deleteConversation: (id: string) => request<void>(`/conversations/${id}`, { method: "DELETE" }),
-  sendMessage: (conversationId: string, audio: Blob, filename: string, transcript?: string) => {
+  // File upload path — audio bytes only; server batch-transcribes via Deepgram.
+  sendMessage: (conversationId: string, audio: Blob, filename: string) => {
     const formData = new FormData()
     formData.append("file", audio, filename)
-    // Set when audio was already transcribed live via /ws/transcribe — lets
-    // the server skip a redundant batch transcription call.
-    if (transcript !== undefined) formData.append("transcript", transcript)
+    return request<MessageTurn>(`/conversations/${conversationId}/messages`, {
+      method: "POST",
+      body: formData,
+    })
+  },
+  // Live recording path — transcript already captured via /ws/transcribe.
+  // filename marks the turn as a recording without uploading audio bytes.
+  sendLiveRecordingMessage: (
+    conversationId: string,
+    transcript: string,
+    filename = "recording.webm",
+  ) => {
+    const formData = new FormData()
+    formData.append("transcript", transcript)
+    formData.append("filename", filename)
     return request<MessageTurn>(`/conversations/${conversationId}/messages`, {
       method: "POST",
       body: formData,
