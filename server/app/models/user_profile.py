@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, String, Text, func
+from sqlalchemy import DateTime, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -28,12 +28,11 @@ class UserProfile(Base):
     # are multi-select, and because the form will keep changing shape.
     fields: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     # NULL means no personal layer — notes generate normally without one.
-    # Never empty string: null is the single "absent" state.
+    # Never empty string: null is the single "absent" state. Private: it is
+    # compiled from the answers and pasted into the prompt, but never returned
+    # to the client. The user controls their answers and their Instructions,
+    # not this paraphrase of them.
     compiled_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Set when the user rewrites the compiled text by hand. Regeneration then
-    # requires explicit confirmation, so changing a form field can't silently
-    # discard what they wrote.
-    is_edited: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     # Set when a compilation attempt fails. Without it, a null
     # compiled_prompt is ambiguous: it could mean the user never filled the
     # profile in, or that we tried and it broke. Cleared on every success.

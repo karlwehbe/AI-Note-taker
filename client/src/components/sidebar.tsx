@@ -9,6 +9,7 @@ import { PanelLeftClose, PanelLeftOpen, Plus, User, X } from "lucide-react"
 
 import { ConfirmDialog } from "@/components/confirm-dialog"
 import { ProfileDialog } from "@/components/profile-dialog"
+import { RecordingWidget } from "@/components/recording-widget"
 import { api } from "@/lib/api"
 import { useConversationsContext } from "@/lib/conversations-context"
 import { useRecordingContext } from "@/lib/recording-context"
@@ -127,15 +128,20 @@ export function Sidebar() {
         >
           <Plus className="size-5" />
         </Link>
-        <button
-          type="button"
-          onClick={() => setShowProfile(true)}
-          className={`mt-auto rounded-md p-2 text-[var(--muted)] hover:bg-[var(--hover)] ${FOCUS_RING}`}
-          aria-label="Your profile"
-          title={profile?.name?.trim() || "Your profile"}
-        >
-          <User className="size-5" />
-        </button>
+        {/* mt-auto moves to the widget so both it and the profile stay
+            pinned to the bottom, with the widget directly above. */}
+        <div className="mt-auto flex flex-col items-center gap-2">
+          <RecordingWidget collapsed />
+          <button
+            type="button"
+            onClick={() => setShowProfile(true)}
+            className={`rounded-md p-2 text-[var(--muted)] hover:bg-[var(--hover)] ${FOCUS_RING}`}
+            aria-label="Your profile"
+            title={profile?.name?.trim() || "Your profile"}
+          >
+            <User className="size-5" />
+          </button>
+        </div>
         <ProfileDialog open={showProfile} onClose={() => setShowProfile(false)} onSaved={setProfile} />
       </aside>
     )
@@ -214,6 +220,16 @@ export function Sidebar() {
           ))
         )}
       </nav>
+
+      {/* Above the profile row and inside the sidebar's normal flow, so it
+          pushes the profile down instead of covering it. Renders nothing
+          unless a recording is running somewhere else. */}
+      {/* p-2 — the same padding as the profile block below, so the two rows
+          sit identically inside their containers and their hover rectangles
+          are the same distance from the divider between them. */}
+      <div className="p-2">
+        <RecordingWidget />
+      </div>
 
       <div className="border-t border-border p-2" aria-busy={profileLoading}>
         {profileLoading ? (

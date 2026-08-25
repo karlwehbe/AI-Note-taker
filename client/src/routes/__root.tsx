@@ -8,7 +8,6 @@
 // thread).
 import { createRootRoute, Outlet } from "@tanstack/react-router"
 
-import { RecordingWidget } from "@/components/recording-widget"
 import { Sidebar } from "@/components/sidebar"
 import { ConversationsProvider } from "@/lib/conversations-context"
 import { RecordingProvider } from "@/lib/recording-context"
@@ -27,7 +26,6 @@ export const Route = createRootRoute({
             <Outlet />
           </div>
         </div>
-        <RecordingWidget />
       </RecordingProvider>
     </ConversationsProvider>
   ),

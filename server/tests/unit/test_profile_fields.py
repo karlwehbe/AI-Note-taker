@@ -16,7 +16,7 @@ def test_empty_profile_renders_nothing() -> None:
 
 
 def test_blank_answers_are_omitted_not_labelled() -> None:
-    assert format_profile_fields({"occupation": "   ", "extra": ""}, "  ") == ""
+    assert format_profile_fields({"occupation": "   "}, "  ") == ""
 
 
 def test_name_is_included() -> None:
@@ -31,7 +31,6 @@ def test_every_answered_field_survives() -> None:
             "background_level": "Some background",
             "notes_purpose": ["Revision", "Exams"],
             "emphasize": ["Definitions"],
-            "extra": "Prefers worked examples",
         },
         "Karl",
     )
@@ -43,7 +42,6 @@ def test_every_answered_field_survives() -> None:
         "Revision",
         "Exams",
         "Definitions",
-        "Prefers worked examples",
     ):
         assert expected in rendered, f"{expected!r} was dropped"
 
@@ -67,5 +65,21 @@ def test_ignores_unknown_keys() -> None:
 
 
 def test_one_line_per_answer() -> None:
-    rendered = format_profile_fields({"occupation": "Engineer", "extra": "Likes examples"}, "Karl")
+    rendered = format_profile_fields({"occupation": "Engineer", "education_level": "Undergrad"}, "Karl")
     assert len(rendered.splitlines()) == 3
+
+
+def test_instructions_never_reach_the_compiler() -> None:
+    """The user's directives go to the writer verbatim, not through the
+    compiler — which is written to produce a third-person biography and
+    explicitly rejects imperatives."""
+    rendered = format_profile_fields(
+        {"occupation": "Engineer", "instructions": "Always add a worked example"}, "Karl"
+    )
+    assert "worked example" not in rendered
+
+
+def test_legacy_extra_key_also_stays_out() -> None:
+    # `extra` was this field's name before the rename; old rows still have it.
+    rendered = format_profile_fields({"occupation": "Engineer", "extra": "Old free text"}, "Karl")
+    assert "Old free text" not in rendered

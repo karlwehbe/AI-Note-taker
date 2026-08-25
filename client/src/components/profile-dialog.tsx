@@ -1,15 +1,19 @@
-// "Your profile" — the personal context layer. A short form, compiled
-// server-side by an LLM into a short description of the user that rides
-// along on every note/chat prompt as context about who's reading.
+// "Your profile" — the personal context layer. Two things go to the model
+// from here, and they are handled very differently:
 //
-// The compiled text is shown and editable on purpose: an invisible profile
-// feels like it does nothing, and being able to read (and fix) what the
-// assistant was told is what makes the feature trustworthy. Editing it by
-// hand sets is_edited server-side, after which changing a form answer asks
-// before overwriting your wording.
+//   The answers (name, occupation, level, purposes, emphasis) are compiled
+//   server-side into a short third-person description of the user. That text
+//   is PRIVATE — never returned to the client, never shown. It used to be
+//   displayed in an editable box, which is what required a hand-edit
+//   endpoint, an is_edited column, and a confirm dialog to stop a form change
+//   silently overwriting it. All of that went with it.
+//
+//   Instructions are the user's own words, sent to the writer verbatim. They
+//   skip the compiler entirely: paraphrasing a directive is how it gets
+//   softened or dropped.
 import { useEffect, useState } from "react"
 import { createPortal } from "react-dom"
-import { AlertCircle, Loader2, RefreshCw, X } from "lucide-react"
+import { AlertCircle, Loader2, X } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { ConfirmDialog } from "@/components/confirm-dialog"
@@ -26,7 +30,7 @@ const EMPTY_FIELDS: ProfileFields = {
   education_level: "",
   notes_purpose: [],
   emphasize: [],
-  extra: "",
+  instructions: "",
 }
 
 // Deliberately domain-neutral. An earlier set led with "Code", which skewed
@@ -55,7 +59,9 @@ const EMPHASIZE = [
   "Code snippets",
 ]
 
-const EXTRA_MAX = 200
+// Matches MAX_INSTRUCTIONS_LEN on the server, which rejects anything longer
+// with a 422. Bounded because this text rides on every generation call.
+const INSTRUCTIONS_MAX = 600
 
 // Normalized form state, used to tell whether anything actually changed.
 // The multi-selects are sorted because toggling appends, so picking the same
@@ -69,7 +75,7 @@ function snapshot(name: string, fields: ProfileFields): string {
     education_level: fields.education_level,
     notes_purpose: [...fields.notes_purpose].sort(),
     emphasize: [...fields.emphasize].sort(),
-    extra: fields.extra.trim(),
+    instructions: fields.instructions.trim(),
   })
 }
 
@@ -108,18 +114,11 @@ function Choice({
 export function ProfileDialog({ open, onClose, onSaved }: Props) {
   const [name, setName] = useState("")
   const [fields, setFields] = useState<ProfileFields>(EMPTY_FIELDS)
-  const [compiled, setCompiled] = useState("")
-  const [isEdited, setIsEdited] = useState(false)
-  const [compileFailed, setCompileFailed] = useState(false)
   // What the server last confirmed. Save stays disabled until the form
   // diverges from it.
   const [savedSnapshot, setSavedSnapshot] = useState(() => snapshot("", EMPTY_FIELDS))
-  // Instructions are saved by Save now rather than on blur, so their
-  // last-saved value is tracked the same way.
-  const [savedCompiled, setSavedCompiled] = useState("")
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [confirmRegenerate, setConfirmRegenerate] = useState(false)
   const [confirmClear, setConfirmClear] = useState(false)
 
   useEffect(() => {
@@ -143,11 +142,7 @@ export function ProfileDialog({ open, onClose, onSaved }: Props) {
         if (cancelled) return
         setName(p.name)
         setFields({ ...EMPTY_FIELDS, ...p.fields })
-        setCompiled(p.compiled_prompt ?? "")
-        setIsEdited(p.is_edited)
-        setCompileFailed(!p.compiled_prompt && Boolean(p.compile_failed_at))
         setSavedSnapshot(snapshot(p.name, { ...EMPTY_FIELDS, ...p.fields }))
-        setSavedCompiled(p.compiled_prompt ?? "")
       })
       .catch(() => {
         // Non-fatal — an empty form still saves fine.
@@ -157,20 +152,12 @@ export function ProfileDialog({ open, onClose, onSaved }: Props) {
     }
   }, [open])
 
-  const answersChanged = snapshot(name, fields) !== savedSnapshot
-  const instructionsChanged = compiled.trim() !== savedCompiled.trim()
-  const isDirty = answersChanged || instructionsChanged
+  const isDirty = snapshot(name, fields) !== savedSnapshot
 
   if (!open) return null
 
   function apply(saved: UserProfileState) {
-    setCompiled(saved.compiled_prompt ?? "")
-    setIsEdited(saved.is_edited)
-    // A failed compile is reported inline, not as a form-level error: the
-    // answers did save.
-    setCompileFailed(!saved.compiled_prompt && Boolean(saved.compile_failed_at))
     setSavedSnapshot(snapshot(saved.name, { ...EMPTY_FIELDS, ...saved.fields }))
-    setSavedCompiled(saved.compiled_prompt ?? "")
     onSaved(saved)
   }
 
@@ -184,45 +171,13 @@ export function ProfileDialog({ open, onClose, onSaved }: Props) {
     setField(key, current.includes(value) ? current.filter((v) => v !== value) : [...current, value])
   }
 
-  async function save(regenerate = false) {
+  // The description the server compiles from these answers is private, so
+  // there is nothing to confirm before overwriting and no separate save step.
+  async function handleSave() {
     setBusy(true)
     setError(null)
     try {
-      // Hand-edited description is saved FIRST. That sets is_edited
-      // server-side, so the profile save below won't recompile over them —
-      // no wasted LLM call, and the user's wording wins.
-      if (instructionsChanged && !regenerate) {
-        await api.saveCompiledPrompt(compiled)
-      }
-      // Compilation runs inside this request, so the response already
-      // carries the new description — show them rather than closing.
-      apply(await api.saveProfile({ name, fields, regenerate }))
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Something went wrong")
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  // Recompiling would destroy a hand-written description, so ask first — but
-  // only about wording from a PREVIOUS session. If the user just edited the
-  // box in front of them, keeping it is obviously what they want.
-  function handleSave() {
-    if (isEdited && !instructionsChanged && answersChanged) {
-      setConfirmRegenerate(true)
-      return
-    }
-    void save()
-  }
-
-  async function handleRegenerate() {
-    setBusy(true)
-    setError(null)
-    try {
-      // Save the current answers first, otherwise Regenerate would compile
-      // from whatever was last persisted rather than what's on screen.
-      await api.saveProfile({ name, fields, regenerate: true })
-      apply(await api.regenerateProfilePrompt())
+      apply(await api.saveProfile({ name, fields }))
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong")
     } finally {
@@ -237,19 +192,8 @@ export function ProfileDialog({ open, onClose, onSaved }: Props) {
       await api.deleteProfile()
       setName("")
       setFields(EMPTY_FIELDS)
-      setCompiled("")
-      setIsEdited(false)
-      setCompileFailed(false)
       setSavedSnapshot(snapshot("", EMPTY_FIELDS))
-      setSavedCompiled("")
-      onSaved({
-        name: "",
-        fields: EMPTY_FIELDS,
-        compiled_prompt: null,
-        is_edited: false,
-        has_profile: false,
-        compile_failed_at: null,
-      })
+      onSaved({ name: "", fields: EMPTY_FIELDS, has_profile: false })
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong")
     } finally {
@@ -375,58 +319,27 @@ export function ProfileDialog({ open, onClose, onSaved }: Props) {
           </div>
 
           <label className="block">
-            <span className="mb-1 block text-sm font-medium">Anything else</span>
+            <span className="mb-1 block text-sm font-medium">Instructions</span>
             <textarea
               className={`thin-scrollbar resize-none ${FIELD} ${FOCUS_RING}`}
-              rows={2}
-              maxLength={EXTRA_MAX}
-              value={fields.extra}
-              onChange={(e) => setField("extra", e.target.value)}
-              placeholder="Exam in 6 weeks, prefer worked examples…"
+              rows={5}
+              maxLength={INSTRUCTIONS_MAX}
+              value={fields.instructions}
+              onChange={(e) => setField("instructions", e.target.value)}
+              placeholder={
+                "eg. keep explanations brief and to the point."
+              }
             />
-            <span className="mt-1 block text-right text-xs text-[var(--muted)]">
-              {fields.extra.length}/{EXTRA_MAX}
-            </span>
+            <div className="mt-1 flex items-start justify-between gap-3">
+              <span className="text-xs text-[var(--muted)]">
+                The AI will keep these in mind when writing the notes.
+              </span>
+              <span className="shrink-0 text-xs text-[var(--muted)]">
+                {fields.instructions.length}/{INSTRUCTIONS_MAX}
+              </span>
+            </div>
           </label>
 
-          {!compiled && compileFailed ? (
-            <div className="-mt-2 rounded-lg border border-border bg-[var(--sidebar)] px-3 py-2.5">
-              <div className="flex items-start justify-between gap-3">
-                <p className="min-w-0 text-sm text-[var(--muted)]">
-                  Your answers are saved, but the description couldn't be generated.
-                </p>
-                <button
-                  type="button"
-                  onClick={() => void handleRegenerate()}
-                  disabled={busy}
-                  className={`flex shrink-0 items-center gap-1 text-xs text-[var(--muted)] hover:text-foreground disabled:opacity-50 ${FOCUS_RING}`}
-                >
-                  <RefreshCw className={`size-3.5 ${busy ? "animate-spin" : ""}`} />
-                  Retry
-                </button>
-              </div>
-            </div>
-          ) : null}
-
-          {compiled ? (
-            <div className="-mt-2 block">
-              <span className="mb-1 block text-sm font-medium">
-                About you
-                {isEdited ? (
-                  <span className="ml-1.5 text-xs font-normal text-[var(--muted)]">(edited by you)</span>
-                ) : null}
-              </span>
-              <textarea
-                className={`thin-scrollbar resize-none ${FIELD} ${FOCUS_RING}`}
-                rows={6}
-                value={compiled}
-                onChange={(e) => setCompiled(e.target.value)}
-                />
-              <span className="mt-1 block text-xs text-[var(--muted)]">
-                A short description of you, pasted into the AI as context. Edit if you want.
-              </span>
-            </div>
-          ) : null}
         </div>
 
         {error ? (
@@ -465,27 +378,9 @@ export function ProfileDialog({ open, onClose, onSaved }: Props) {
       </div>
 
       <ConfirmDialog
-        open={confirmRegenerate}
-        title="Replace your edited description?"
-        description="You rewrote the description by hand. Saving these answers will compile a new version and discard your wording."
-        confirmLabel="Replace"
-        cancelLabel="Keep mine"
-        destructive
-        onConfirm={() => {
-          setConfirmRegenerate(false)
-          void save(true)
-        }}
-        // "Keep mine" still saves the answers — it only declines the recompile.
-        onCancel={() => {
-          setConfirmRegenerate(false)
-          void save(false)
-        }}
-      />
-
-      <ConfirmDialog
         open={confirmClear}
         title="Clear your profile?"
-        description="Your answers and the generated description will be deleted. Notes will be written without personalization until you fill it in again."
+        description="Your answers and instructions will be deleted. Notes will be written without personalization until you fill it in again."
         confirmLabel="Clear"
         destructive
         onConfirm={() => {

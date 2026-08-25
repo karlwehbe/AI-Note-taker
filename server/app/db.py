@@ -69,6 +69,13 @@ def init_db() -> None:
             )
         )
 
+        # is_edited existed only to guard a hand-edited compiled prompt. The
+        # compiled description is private now — there is nothing for the user
+        # to edit, so nothing to protect.
+        conn.execute(
+            text("ALTER TABLE user_profiles DROP COLUMN IF EXISTS is_edited")
+        )
+
 
 def check_db_connection() -> bool:
     try:

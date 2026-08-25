@@ -1,8 +1,9 @@
 """Integration tests: the profile API.
 
-The interesting part is the three-state machine around compiled_prompt and
-compile_failed_at, and the is_edited guard that stops a form change silently
-overwriting text the user rewrote by hand.
+Two things go to the model from here. The answers are compiled into a private
+description of the user — never returned by the API, so these assert against
+the DB row. Instructions are the user's own text, stored verbatim and kept out
+of the compiler entirely.
 """
 
 import pytest
@@ -21,7 +22,7 @@ ANSWERS = {
         "background_level": "Some background",
         "notes_purpose": ["Revision"],
         "emphasize": ["Definitions"],
-        "extra": "",
+        "instructions": "",
     },
 }
 
@@ -49,7 +50,7 @@ class TestEmptyProfile:
     def test_get_with_no_row(self, client: TestClient) -> None:
         response = client.get("/profile")
         assert response.status_code == 200
-        assert response.json()["compiled_prompt"] is None
+        assert response.json()["has_profile"] is False
 
     def test_delete_with_no_row_is_still_204(self, client: TestClient) -> None:
         assert client.delete("/profile").status_code == 204
@@ -60,9 +61,9 @@ class TestSaveAndCompile:
         stub_compile()
         response = client.put("/profile", json=ANSWERS)
         assert response.status_code == 200
-        assert response.json()["compiled_prompt"] == COMPILED
 
         profile = db.query(UserProfile).one()
+        assert profile.compiled_prompt == COMPILED
         assert profile.name == "Karl"
         assert profile.fields["occupation"] == "Software Engineer"
 
@@ -102,6 +103,64 @@ class TestSaveAndCompile:
         payload = {**ANSWERS, "fields": {**ANSWERS["fields"], "occupation": "x" * 500}}
         assert client.put("/profile", json=payload).status_code == 422
 
+    def test_over_long_instructions_are_rejected(self, client: TestClient) -> None:
+        # The cap is the only bound on text that reaches the prompt verbatim.
+        payload = {**ANSWERS, "fields": {**ANSWERS["fields"], "instructions": "x" * 700}}
+        assert client.put("/profile", json=payload).status_code == 422
+
+
+class TestInstructions:
+    """The user's own directions: stored as typed, never compiled, never
+    exposed alongside a description they cannot see."""
+
+    INSTRUCTIONS = "End every section with a one-line summary.\nUse tables for comparisons."
+
+    def test_stored_exactly_as_typed(self, client: TestClient, db: Session, stub_compile) -> None:
+        stub_compile()
+        payload = {**ANSWERS, "fields": {**ANSWERS["fields"], "instructions": self.INSTRUCTIONS}}
+        client.put("/profile", json=payload)
+        assert db.query(UserProfile).one().fields["instructions"] == self.INSTRUCTIONS
+
+    def test_round_trips_through_the_api(self, client: TestClient, stub_compile) -> None:
+        stub_compile()
+        payload = {**ANSWERS, "fields": {**ANSWERS["fields"], "instructions": self.INSTRUCTIONS}}
+        client.put("/profile", json=payload)
+        assert client.get("/profile").json()["fields"]["instructions"] == self.INSTRUCTIONS
+
+    def test_legacy_extra_key_is_read_as_instructions(self, client: TestClient, db: Session, stub_compile) -> None:
+        # Rows written before the rename hold `extra` and no `instructions`
+        # key at all. The response must surface that text under the new name
+        # rather than showing the user an empty box.
+        stub_compile()
+        client.put("/profile", json=ANSWERS)
+        profile = db.query(UserProfile).one()
+        legacy = {k: v for k, v in profile.fields.items() if k != "instructions"}
+        profile.fields = {**legacy, "extra": "Old free text"}  # reassign: JSONB isn't tracked
+        db.commit()
+
+        assert client.get("/profile").json()["fields"]["instructions"] == "Old free text"
+
+
+class TestPrivateDescription:
+    """The compiled description is generated and used, but never returned."""
+
+    def test_not_in_the_save_response(self, client: TestClient, stub_compile) -> None:
+        stub_compile()
+        body = client.put("/profile", json=ANSWERS).json()
+        assert "compiled_prompt" not in body
+        assert COMPILED not in str(body)
+
+    def test_not_in_the_get_response(self, client: TestClient, stub_compile) -> None:
+        stub_compile()
+        client.put("/profile", json=ANSWERS)
+        assert COMPILED not in str(client.get("/profile").json())
+
+    def test_the_hand_edit_endpoints_are_gone(self, client: TestClient) -> None:
+        # They existed only to expose and protect the visible description.
+        # 404, not 405: the paths themselves no longer exist on the router.
+        assert client.put("/profile/prompt", json={"compiled_prompt": "mine"}).status_code == 404
+        assert client.post("/profile/regenerate").status_code == 404
+
 
 class TestThreeStates:
     """compiled_prompt alone is ambiguous — null could mean "never filled in"
@@ -122,44 +181,15 @@ class TestThreeStates:
         assert profile.compile_failed_at is not None
 
     def test_success_clears_a_previous_failure(self, client: TestClient, db: Session, stub_compile) -> None:
+        # No Regenerate endpoint any more — saving a changed answer is the
+        # only way to recompile, and it no longer asks permission.
         stub_compile(raises=RuntimeError("provider down"))
         client.put("/profile", json=ANSWERS)
         stub_compile()
-        client.post("/profile/regenerate")
+        client.put("/profile", json={**ANSWERS, "name": "Karl W"})
         profile = db.query(UserProfile).one()
         assert profile.compiled_prompt == COMPILED
         assert profile.compile_failed_at is None
-
-
-class TestHandEditedPrompt:
-    def test_editing_sets_is_edited(self, client: TestClient, db: Session) -> None:
-        client.put("/profile/prompt", json={"compiled_prompt": "My own wording."})
-        profile = db.query(UserProfile).one()
-        assert profile.compiled_prompt == "My own wording."
-        assert profile.is_edited is True
-
-    def test_a_form_change_does_not_silently_overwrite_an_edit(
-        self, client: TestClient, db: Session, stub_compile
-    ) -> None:
-        calls = stub_compile()
-        client.put("/profile/prompt", json={"compiled_prompt": "My own wording."})
-        client.put("/profile", json=ANSWERS)  # regenerate not requested
-
-        assert calls == [], "a hand-edited prompt was recompiled without confirmation"
-        assert db.query(UserProfile).one().compiled_prompt == "My own wording."
-
-    def test_explicit_regenerate_overrides_the_edit(self, client: TestClient, db: Session, stub_compile) -> None:
-        stub_compile()
-        client.put("/profile/prompt", json={"compiled_prompt": "My own wording."})
-        client.put("/profile", json={**ANSWERS, "regenerate": True})
-        assert db.query(UserProfile).one().compiled_prompt == COMPILED
-
-    def test_clearing_the_prompt_unsets_is_edited(self, client: TestClient, db: Session) -> None:
-        client.put("/profile/prompt", json={"compiled_prompt": "My own wording."})
-        client.put("/profile/prompt", json={"compiled_prompt": "   "})
-        profile = db.query(UserProfile).one()
-        assert profile.compiled_prompt is None
-        assert profile.is_edited is False
 
 
 class TestDelete:

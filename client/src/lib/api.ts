@@ -44,21 +44,16 @@ export type ProfileFields = {
   education_level: string
   notes_purpose: string[]
   emphasize: string[]
-  extra: string
+  // The user's own directions for the AI. Sent to the writer verbatim.
+  instructions: string
 }
 
+// No compiled_prompt: the server still compiles a description of the user
+// from these answers, but it is private and never sent to the client.
 export type UserProfileState = {
   name: string
   fields: ProfileFields
-  // null = no personal layer; notes generate normally without one.
-  compiled_prompt: string | null
-  // true once the user rewrites compiled_prompt by hand — changing a form
-  // field then requires confirmation before it's replaced.
-  is_edited: boolean
   has_profile: boolean
-  // Set alongside a null compiled_prompt when compilation was attempted and
-  // failed — distinguishes that from a profile that was never filled in.
-  compile_failed_at: string | null
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -119,20 +114,11 @@ export const api = {
       keepalive: true,
     }),
   getProfile: () => request<UserProfileState>("/profile"),
-  // regenerate: pass true only after the user has confirmed discarding a
-  // hand-edited prompt — otherwise the server leaves their wording alone.
-  saveProfile: (input: { name: string; fields: ProfileFields; regenerate?: boolean }) =>
+  saveProfile: (input: { name: string; fields: ProfileFields }) =>
     request<UserProfileState>("/profile", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
-    }),
-  regenerateProfilePrompt: () => request<UserProfileState>("/profile/regenerate", { method: "POST" }),
-  saveCompiledPrompt: (compiled_prompt: string) =>
-    request<UserProfileState>("/profile/prompt", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ compiled_prompt }),
     }),
   deleteProfile: () => request<void>("/profile", { method: "DELETE" }),
 }
