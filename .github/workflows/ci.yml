@@ -88,14 +88,17 @@ jobs:
           cache-dependency-path: client/package-lock.json
       - name: Start the stack with a stubbed model
         run: |
-          docker compose -f docker-compose.yml -f docker-compose.test.yml up -d --build
-          # The API's own database has to exist before init_db can create tables in it.
+          # Only the stubbed test API (8001) — not the dev api on 8000.
+          docker compose -f docker-compose.yml -f docker-compose.test.yml up -d --build db
           until docker compose exec -T db pg_isready -U postgres; do sleep 1; done
-          docker compose exec -T db psql -U postgres -c \
-            "SELECT 'CREATE DATABASE ai_note_taker_system' WHERE NOT EXISTS \
-             (SELECT FROM pg_database WHERE datname='ai_note_taker_system')\gexec"
-          docker compose -f docker-compose.yml -f docker-compose.test.yml restart api
-          until curl -sf http://localhost:8000/health; do sleep 1; done
+          # CREATE DATABASE via a plain SQL check. \gexec is a psql meta-command
+          # and is rejected when passed to psql -c (as happened in CI).
+          docker compose exec -T db \
+            psql -U postgres -tc "SELECT 1 FROM pg_database WHERE datname = 'ai_note_taker_system'" \
+            | grep -q 1 \
+            || docker compose exec -T db psql -U postgres -c "CREATE DATABASE ai_note_taker_system"
+          docker compose -f docker-compose.yml -f docker-compose.test.yml up -d --build llm-stub api-test
+          until curl -sf http://localhost:8001/health; do sleep 1; done
       - name: System tests
         working-directory: server
         run: |

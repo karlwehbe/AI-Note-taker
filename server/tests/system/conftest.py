@@ -3,10 +3,13 @@
 These talk to a running stack over real HTTP — no TestClient, no dependency
 overrides, no in-process shortcuts. Bring it up first:
 
-    docker compose exec -T db psql -U postgres -c \\
-        "SELECT 'CREATE DATABASE ai_note_taker_system'
-         WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname='ai_note_taker_system')\\gexec"
-    docker compose -f docker-compose.yml -f docker-compose.test.yml up -d --build
+    docker compose -f docker-compose.yml -f docker-compose.test.yml up -d --build db
+    until docker compose exec -T db pg_isready -U postgres; do sleep 1; done
+    docker compose exec -T db \\
+        psql -U postgres -tc "SELECT 1 FROM pg_database WHERE datname = 'ai_note_taker_system'" \\
+        | grep -q 1 \\
+        || docker compose exec -T db psql -U postgres -c "CREATE DATABASE ai_note_taker_system"
+    docker compose -f docker-compose.yml -f docker-compose.test.yml up -d --build llm-stub api-test
 
 If the stack isn't reachable the whole layer skips rather than fails — an
 absent environment is not a broken build.
