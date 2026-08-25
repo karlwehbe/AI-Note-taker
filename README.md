@@ -28,8 +28,9 @@ it works; this file is about running it.
   document. Only then does the expensive call run.
 - **Draft autosave** — the live transcript is persisted every few seconds, so a
   tab crash mid-lecture doesn't lose it.
-- **A personal context layer** — a short profile form, compiled by an LLM into a
-  description of the user that rides along on every note/chat prompt.
+- **A personal context layer** — a short profile form, compiled by an LLM into
+  a *private* description of the reader that rides along on every note/chat
+  prompt, plus an **Instructions** box whose text reaches the writer verbatim.
 - **Rich rendering** — GFM, LaTeX math via KaTeX, and Mermaid diagrams. The
   model is instructed to draw a diagram when the material describes a process,
   a state machine, a message exchange, or a branching decision.
@@ -55,7 +56,9 @@ for why that split exists.
 ```text
 AI-Note-Taker/
 ├── setup.sh              # one-command setup (see below)
+├── redeploy.sh           # rebuild + restart the backend after a code change
 ├── docker-compose.yml    # local dev stack: db + api + worker
+├── docker-compose.test.yml # second stack on :8001 with a stubbed model
 ├── Dockerfile            # single image, used by both api and worker services
 ├── .env / .env.example   # shared config, loaded by the server (and by
 │                         # docker-compose.yml to fill in ${VARS})
@@ -75,13 +78,14 @@ AI-Note-Taker/
 │   │   │   ├── markdown.tsx         # shared renderer: GFM + math + raw HTML + mermaid
 │   │   │   ├── mermaid-diagram.tsx  # ```mermaid fences → SVG, lazily imported
 │   │   │   ├── message-bubble.tsx   # chat turns, with a file chip for uploads
-│   │   │   ├── profile-dialog.tsx   # the personal context form
+│   │   │   ├── profile-dialog.tsx   # the profile form + Instructions box
 │   │   │   ├── sidebar.tsx          # conversation list + profile row
 │   │   │   └── ui/                  # shadcn/ui-generated components
 │   │   └── lib/
 │   │       ├── api.ts               # typed client for every endpoint
 │   │       ├── recording-context.tsx # the recording engine — lives above the router
 │   │       └── conversations-context.tsx # shared conversation list state
+│   ├── e2e/                   # Playwright acceptance tests
 │   ├── vite.config.ts         # dev server + build config, "@/" alias, router plugin
 │   └── .oxlintrc.json         # linter config (oxlint, not ESLint)
 │
@@ -99,9 +103,9 @@ AI-Note-Taker/
     │       ├── health.py         # GET /health
     │       ├── conversations.py  # conversations + the send-message turn
     │       ├── live_transcribe.py # WS /ws/transcribe — Deepgram proxy
-    │       └── profile.py        # the personal context layer
+    │       └── profile.py        # the profile form + Instructions
     ├── pyproject.toml           # Python deps + project metadata
-    └── tests/                   # pytest suite
+    └── tests/                   # unit / integration / system layers
 ```
 
 Root-level dotfiles (`Dockerfile`, `docker-compose.yml`, `.env*`, `.gitignore`)
@@ -135,6 +139,21 @@ cd client && npm install && npm run dev
 - Frontend: [localhost:5173](http://localhost:5173)
 - API: [localhost:8000](http://localhost:8000) — interactive docs at `/docs`
 - Postgres: `localhost:5432` / `postgres` / `postgres` / db `ai_note_taker`
+
+### After changing backend code
+
+```bash
+./redeploy.sh
+```
+
+The `api` service has **no bind mount** — it runs code baked into the image at
+build time, so editing a `.py` file changes nothing until the image is rebuilt.
+`docker compose restart api` looks like it worked and silently keeps serving the
+old code. The script rebuilds, waits for health, and then compares a hash of
+`notes_graph.py` inside the container against your working copy, so a cached
+layer fails loudly instead of invisibly. It never touches the `db` service and
+never passes `-v`, so your data is safe; `./setup.sh --reset` is the only thing
+that wipes it.
 
 ### Configuration
 
@@ -173,25 +192,61 @@ to be handled by hand, or with `./setup.sh --reset`.
 | `POST /conversations/{id}/messages` | One turn: audio and/or text in, notes + reply out |
 | `WS /ws/transcribe` | Deepgram live-streaming proxy |
 | `GET·PUT·DELETE /profile` | The personal context form |
-| `POST /profile/regenerate` | Recompile the user description from the answers |
-| `PUT /profile/prompt` | Save a hand-edited version of the compiled text |
 
 ## Tests
 
+Four layers. The first two need nothing but the code; the last two need a
+running stack.
+
+| Layer | Where | Needs |
+|---|---|---|
+| Unit (server) | `server/tests/unit/` | nothing |
+| Unit (client) | `client/src/**/*.test.ts` | nothing |
+| Integration | `server/tests/integration/` | Postgres |
+| System | `server/tests/system/` | the test stack |
+| Acceptance | `client/e2e/` | the test stack + a browser |
+
 ```bash
-cd server
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-pytest
+cd server && pytest tests/unit tests/integration -q
+cd client && npm test
 ```
 
-`setup.sh` creates that venv for you. Coverage is thin — one health-check test
-— and the LLM paths aren't tested at all.
+`setup.sh` creates the server venv for you.
+
+### System and acceptance tests
+
+These run against a second stack defined by `docker-compose.test.yml`, which
+adds an `api-test` service on **port 8001** and a stub standing in for OpenAI.
+It is a separate service rather than an override of `api` on purpose: both
+stacks then run side by side, and your dev API on :8000 — with real API keys
+and your real notes — is never touched.
+
+```bash
+docker compose exec -T db psql -U postgres -c \
+  "SELECT 'CREATE DATABASE ai_note_taker_system' WHERE NOT EXISTS \
+   (SELECT FROM pg_database WHERE datname='ai_note_taker_system')\gexec"
+docker compose -f docker-compose.yml -f docker-compose.test.yml up -d --build api-test llm-stub
+
+cd server && pytest tests/system -q
+cd client && npm run test:e2e
+```
+
+The stub reads the schema off each request and answers with canned structured
+output, so nothing costs money and nothing flakes on model sampling. Deepgram
+is *not* stubbed — its URL is a module constant rather than a setting — so the
+audio path has no system coverage; the integration layer covers it by stubbing
+`transcribe_audio` directly.
+
+A handful of tests are marked expected-to-fail. Those document known bugs and
+will fail loudly if someone fixes the underlying defect without updating them.
 
 ## Deploy
 
-Push to any branch runs GitHub Actions: pytest against Python 3.12
-(`.github/workflows/ci.yml`). No deploy step — no hosting target chosen yet.
+Push to any branch runs GitHub Actions (`.github/workflows/ci.yml`), in three
+jobs: `server` (unit + integration against a `postgres:16` service), `client`
+(lint + unit), and `acceptance` (brings up the stubbed stack, then runs the
+system and Playwright suites, uploading traces on failure). No deploy step —
+no hosting target chosen yet.
 
 The production image builds from the repo-root [`Dockerfile`](Dockerfile);
 Compose uses the same file for both the `api` and `worker` services.
@@ -202,4 +257,7 @@ Compose uses the same file for both the `api` and `worker` services.
   opens the page.
 - **The worker is a stub.** It logs a heartbeat on a 30-second loop and does no
   job processing. It exists so the process split is already in place.
-- **Test coverage is thin** — see above.
+- **The audio path has no system coverage** — `DEEPGRAM_TRANSCRIPTION_URL` is
+  a module constant, so it can't be redirected at a stub the way OpenAI can.
+- **No rate limiting**, and nothing caps the size of a typed message. Fine
+  locally; not fine on a public host with real API keys.
