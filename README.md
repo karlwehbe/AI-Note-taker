@@ -1,1 +1,205 @@
-# AI-Note-taker
+# AI Note Taker
+
+Record a lecture and watch a notes document write itself.
+
+Speech is transcribed live (Deepgram), and every turn an LLM decides whether the
+input should change the notes — then rewrites the document if it should. The
+notes are a single evolving Markdown file per conversation, not a transcript and
+not a chat log: new material gets integrated into the existing structure rather
+than appended to it.
+
+React + TanStack Router on the front, FastAPI + Postgres on the back, LangGraph
+in the middle. No auth — this is a portfolio build, single user, one profile row.
+
+**[FLOW.md](FLOW.md)** has end-to-end diagrams for every major path, each naming
+the real files and functions involved. Start there if you want to understand how
+it works; this file is about running it.
+
+## What it does
+
+- **Live recording** — mic or system audio, streamed to Deepgram over a
+  server-side WebSocket proxy (the API key never reaches the browser). The
+  transcript appears as you speak, and keeps recording across page navigation.
+- **Audio upload** — no live transcript, so the server transcribes via
+  Deepgram's batch API instead.
+- **Typed messages** — ask a question, or tell it to add a section.
+- **A router decides whether to touch the notes.** A cheap model answers one
+  yes/no question first, so `thanks` or `what does X mean?` can't rewrite the
+  document. Only then does the expensive call run.
+- **Draft autosave** — the live transcript is persisted every few seconds, so a
+  tab crash mid-lecture doesn't lose it.
+- **A personal context layer** — a short profile form, compiled by an LLM into a
+  description of the user that rides along on every note/chat prompt.
+- **Rich rendering** — GFM, LaTeX math via KaTeX, and Mermaid diagrams. The
+  model is instructed to draw a diagram when the material describes a process,
+  a state machine, a message exchange, or a branching decision.
+
+## Architecture
+
+```text
+Browser  ──REST──>  FastAPI  ──>  LangGraph (classify → write_notes | answer_chat)  ──>  OpenAI
+   │                   │
+   └──WebSocket───>  /ws/transcribe  ──proxy──>  Deepgram
+                       │
+                     Postgres (conversations, messages, user_profiles)
+```
+
+Two LLM calls per turn, on two different models: `ROUTING_LLM_MODEL` answers
+"should the notes change?" against a schema with no `note_content` field — so it
+*cannot* write notes even if it wants to — and `LLM_MODEL` does the actual
+writing. See [FLOW.md §10](FLOW.md#10-routing-whether-to-touch-the-notes-at-all)
+for why that split exists.
+
+## Folder structure
+
+```text
+AI-Note-Taker/
+├── setup.sh              # one-command setup (see below)
+├── docker-compose.yml    # local dev stack: db + api + worker
+├── Dockerfile            # single image, used by both api and worker services
+├── .env / .env.example   # shared config, loaded by the server (and by
+│                         # docker-compose.yml to fill in ${VARS})
+├── FLOW.md               # end-to-end diagrams of every major path
+│
+├── client/                    # React + TypeScript + Vite frontend
+│   ├── src/
+│   │   ├── main.tsx           # entry point — boots the TanStack Router instance
+│   │   ├── routes/
+│   │   │   ├── __root.tsx           # shell: sidebar + RecordingProvider above the outlet
+│   │   │   ├── index.tsx            # new-chat page
+│   │   │   └── c.$conversationId.tsx # a conversation: chat left, notes panel right
+│   │   ├── components/
+│   │   │   ├── chat-composer.tsx    # record / attach / type + send
+│   │   │   ├── recording-widget.tsx # floating controls when you navigate away mid-record
+│   │   │   ├── notes-panel.tsx      # the notes document — resizable, collapsible
+│   │   │   ├── markdown.tsx         # shared renderer: GFM + math + raw HTML + mermaid
+│   │   │   ├── mermaid-diagram.tsx  # ```mermaid fences → SVG, lazily imported
+│   │   │   ├── message-bubble.tsx   # chat turns, with a file chip for uploads
+│   │   │   ├── profile-dialog.tsx   # the personal context form
+│   │   │   ├── sidebar.tsx          # conversation list + profile row
+│   │   │   └── ui/                  # shadcn/ui-generated components
+│   │   └── lib/
+│   │       ├── api.ts               # typed client for every endpoint
+│   │       ├── recording-context.tsx # the recording engine — lives above the router
+│   │       └── conversations-context.tsx # shared conversation list state
+│   ├── vite.config.ts         # dev server + build config, "@/" alias, router plugin
+│   └── .oxlintrc.json         # linter config (oxlint, not ESLint)
+│
+└── server/                    # FastAPI backend
+    ├── app/
+    │   ├── main.py             # creates the app, registers routers, configures logging
+    │   ├── config.py           # reads .env into a typed Settings object
+    │   ├── db.py               # engine, session, and init_db() schema setup
+    │   ├── worker.py           # background job process stub (heartbeat only)
+    │   ├── models/             # SQLAlchemy: Conversation, Message, UserProfile
+    │   ├── services/
+    │   │   ├── notes_graph.py  # every prompt + the LangGraph state machine
+    │   │   └── transcription.py # Deepgram batch STT
+    │   └── api/
+    │       ├── health.py         # GET /health
+    │       ├── conversations.py  # conversations + the send-message turn
+    │       ├── live_transcribe.py # WS /ws/transcribe — Deepgram proxy
+    │       └── profile.py        # the personal context layer
+    ├── pyproject.toml           # Python deps + project metadata
+    └── tests/                   # pytest suite
+```
+
+Root-level dotfiles (`Dockerfile`, `docker-compose.yml`, `.env*`, `.gitignore`)
+stay at the repo root because the tools that read them only look there by
+convention — they can't be relocated without breaking those tools.
+
+## Setup
+
+```bash
+./setup.sh          # check prerequisites, write .env, build and start the backend, install client deps
+./setup.sh --start  # ...and start the frontend when it's done
+./setup.sh --reset  # wipe the database volume first (destroys local data)
+```
+
+It's safe to re-run — every step checks the current state before changing
+anything, so it doubles as a "get me back to a working state" script. It'll warn
+about missing API keys and continue; the app starts fine without them, but
+recording and note generation return errors until they're filled in.
+
+### Or by hand
+
+```bash
+cp .env.example .env      # then fill in DEEPGRAM_API_KEY and OPENAI_API_KEY
+docker compose up --build # db + api + worker
+```
+
+```bash
+cd client && npm install && npm run dev
+```
+
+- Frontend: [localhost:5173](http://localhost:5173)
+- API: [localhost:8000](http://localhost:8000) — interactive docs at `/docs`
+- Postgres: `localhost:5432` / `postgres` / `postgres` / db `ai_note_taker`
+
+### Configuration
+
+| Variable | Purpose |
+| --- | --- |
+| `DEEPGRAM_API_KEY` | Transcription, both live and batch ([console.deepgram.com](https://console.deepgram.com)) |
+| `OPENAI_API_KEY` | Note writing, chat replies, profile compile |
+| `LLM_MODEL` | `provider:model` for the writing calls |
+| `ROUTING_LLM_MODEL` | `provider:model` for the yes/no router — keep this cheap |
+| `DATABASE_URL` | SQLAlchemy URL |
+| `CORS_ORIGINS` | Comma-separated browser origins |
+| `VITE_API_URL` | Where the client looks for the API |
+
+Both model strings go straight to LangChain's `init_chat_model`, so switching
+providers is a matter of changing the string and setting the matching key
+(`ANTHROPIC_API_KEY`, `GROQ_API_KEY`, …).
+
+### Schema
+
+There's no migration tool. `init_db()` runs at startup: `create_all()` builds
+any missing tables, and a short list of additive `ALTER TABLE … ADD COLUMN IF
+NOT EXISTS` statements covers columns that landed after the first create.
+Deliberate for a build this size — but it means a destructive schema change has
+to be handled by hand, or with `./setup.sh --reset`.
+
+## API
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /health` | Liveness + a real database round trip |
+| `POST /conversations` | Create — happens eagerly, the moment recording starts |
+| `GET /conversations` | Sidebar list |
+| `GET /conversations/{id}` | Messages + notes + any autosaved draft |
+| `DELETE /conversations/{id}` | Cascades to messages |
+| `PATCH /conversations/{id}/draft` | Autosave the in-progress transcript |
+| `POST /conversations/{id}/messages` | One turn: audio and/or text in, notes + reply out |
+| `WS /ws/transcribe` | Deepgram live-streaming proxy |
+| `GET·PUT·DELETE /profile` | The personal context form |
+| `POST /profile/regenerate` | Recompile the user description from the answers |
+| `PUT /profile/prompt` | Save a hand-edited version of the compiled text |
+
+## Tests
+
+```bash
+cd server
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+pytest
+```
+
+`setup.sh` creates that venv for you. Coverage is thin — one health-check test
+— and the LLM paths aren't tested at all.
+
+## Deploy
+
+Push to any branch runs GitHub Actions: pytest against Python 3.12
+(`.github/workflows/ci.yml`). No deploy step — no hosting target chosen yet.
+
+The production image builds from the repo-root [`Dockerfile`](Dockerfile);
+Compose uses the same file for both the `api` and `worker` services.
+
+## Known gaps
+
+- **No auth.** One profile row, one set of conversations, global to whoever
+  opens the page.
+- **The worker is a stub.** It logs a heartbeat on a 30-second loop and does no
+  job processing. It exists so the process split is already in place.
+- **Test coverage is thin** — see above.

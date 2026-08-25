@@ -1,0 +1,38 @@
+# Python
+server/.venv/
+**/__pycache__/
+**/*.py[cod]
+**/*.egg-info/
+server/.pytest_cache/
+server/.mypy_cache/
+server/.coverage
+server/htmlcov/
+
+# Node
+client/node_modules/
+client/dist/
+
+# Env / secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Claude Code local settings — personal to each machine, and
+# settings.local.json has held a real database URL. The whole directory is
+# ignored rather than just settings.local*.json: a narrow glob misses macOS
+# duplicates like "settings.local 2.json". Declared here, not only in a
+# global gitignore, so the protection travels with the repo.
+.claude/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Playwright artifacts — traces (JPEG screencast frames), failure
+# screenshots, and HTML reports. Regenerated on every run.
+client/test-results/
+client/playwright-report/
+client/blob-report/

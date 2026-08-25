@@ -1,0 +1,12 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+client
+**/__pycache__
+**/*.pyc
+server/.venv
+server/.pytest_cache
+server/**/*.egg-info
+README.md

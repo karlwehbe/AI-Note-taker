@@ -1,0 +1,306 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/fraunces";
+@plugin "@tailwindcss/typography";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  /* Editorial serif for headings, clean sans for body — a deliberate
+     pairing (not a specific product's exact fonts) for a warm, considered
+     feel rather than a generic flat SaaS look. */
+  --font-heading: "Fraunces Variable", serif;
+  --font-sans: "Geist Variable", sans-serif;
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  /* Plan token --muted is text; shadcn bg-muted uses hover surface */
+  --color-muted: var(--hover);
+  --color-muted-foreground: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  --color-hover: var(--hover);
+  --color-divider: var(--divider);
+  --color-error: var(--error);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+:root {
+  /* Design tokens — white background, neutral grays, blue accent. */
+  --text: #000000;
+  --muted: #71717a;
+  --border: #dadada;
+  --divider: #f4f4f5;
+  --hover: #9191913e;
+  --background: #ffffff;
+  --accent: #1a1a1a;
+  --error: #b91c1c;
+  /* Backgrounds that used to be hardcoded directly in component files —
+     centralized here so every background in the app can be tuned from this
+     one file instead of hunting through .tsx files. */
+  --error-bg: #b91c1a45;
+  --overlay: rgb(0 0 0 / 40%);
+
+  /* shadcn mappings */
+  --foreground: var(--text);
+  --card: var(--background);
+  --card-foreground: var(--text);
+  --popover: var(--background);
+  --popover-foreground: var(--text);
+  --primary: var(--accent);
+  --primary-foreground: #ffffff;
+  --secondary: var(--hover);
+  --secondary-foreground: var(--text);
+  --muted-foreground: var(--muted);
+  --accent-foreground: #ffffff;
+  --destructive: var(--error);
+  --input: var(--border);
+  --ring: var(--accent);
+  --chart-1: var(--accent);
+  --chart-2: #71717a;
+  --chart-3: #18181b;
+  --chart-4: #e4e4e7;
+  --chart-5: #f4f4f5;
+  --radius: 0.5rem;
+  --sidebar: #fdfdfd;
+  --sidebar-foreground: var(--text);
+  --sidebar-primary: var(--accent);
+  --sidebar-primary-foreground: #ffffff;
+  /* Deliberately its own value, not var(--hover) — the sidebar's active/
+     hover row and the audio-source popover's hover state were sharing the
+     same token and had become visually identical. */
+  --sidebar-accent: #a4a4a427;
+  --sidebar-accent-foreground: var(--text);
+  --sidebar-border: var(--border);
+  --sidebar-ring: var(--accent);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
+  /* Native <button> elements don't get a pointer cursor by default (unlike
+     links) — applied globally here instead of per-component so every button
+     app-wide is covered, including ones added later. Disabled ones get
+     not-allowed instead, so they don't look clickable. */
+  button:not(:disabled) {
+    cursor: pointer;
+  }
+  button:disabled {
+    cursor: not-allowed;
+  }
+}
+
+/* A thinner, borderless scrollbar than the chunky OS default — for
+   scrollable content areas (e.g. the composer's textarea) where the default
+   scrollbar looks heavy against the minimal design. */
+.thin-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: #d3d3d39a transparent;
+}
+
+/* Composer drop target — slight scale + border emphasis while a file is
+   dragged over it. No overlay copy; the shell itself is the affordance. */
+.composer-file-drag {
+  transform: scale(1.012);
+  border-color: var(--ring);
+}
+
+
+/* Three-dot "typing" animation for the Generating… indicator — each dot
+   fades in/out on a staggered delay (set via inline style) so they pulse
+   one after another rather than all together. */
+@keyframes typing-dot {
+  0%,
+  80%,
+  100% {
+    opacity: 0.2;
+  }
+  40% {
+    opacity: 1;
+  }
+}
+.typing-dot {
+  animation: typing-dot 1.4s ease-in-out infinite both;
+}
+
+/* Blinking caret at the end of a streaming assistant reply. */
+@keyframes stream-caret {
+  50% {
+    opacity: 0;
+  }
+}
+.stream-caret {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 1px;
+  vertical-align: -0.1em;
+  background: currentColor;
+  animation: stream-caret 1s steps(1, end) infinite;
+}
+/* Streaming raw TeX — a hair smaller than body, still readable. */
+.prose em.pending-tex {
+  font-size: 0.95em;
+  font-style: italic;
+  color: inherit;
+}
+@media (prefers-reduced-motion: reduce) {
+  .stream-caret {
+    animation: none;
+  }
+}
+
+/* Map @tailwindcss/typography's color tokens to our own warm palette, so
+   rendered Markdown (assistant notes) matches the rest of the design system
+   instead of the plugin's default grays. */
+.prose {
+  --tw-prose-body: var(--text);
+  --tw-prose-headings: var(--text);
+  --tw-prose-bold: var(--text);
+  --tw-prose-bullets: var(--muted);
+  --tw-prose-counters: var(--muted);
+  --tw-prose-links: var(--accent);
+  --tw-prose-code: var(--text);
+  --tw-prose-hr: var(--border);
+  --tw-prose-quotes: var(--muted);
+  --tw-prose-quote-borders: var(--border);
+}
+
+/* KaTeX (math in notes/messages). A long display equation would otherwise
+   widen the whole column — same overflow problem the chat bubbles had — so
+   it scrolls inside its own box instead. Display math is centered with flex
+   so it works even when the formula is short. */
+.katex-display {
+  display: flex !important;
+  justify-content: center;
+  width: 100%;
+  box-sizing: border-box;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-block: 0.5rem;
+}
+.katex-display > .katex {
+  /* Shrink-wrap so flex centering has something narrower than 100% to place. */
+  display: inline-block;
+  text-align: left;
+  max-width: 100%;
+}
+/* Do NOT center paragraphs that merely contain a .katex span. :only-child
+   ignores text nodes, so "see $x$ here" matched and inherited text-align
+   center onto the whole sentence. Display math is already centered above. */
+/* @tailwindcss/typography sets a serif-ish measure on the prose container;
+   KaTeX brings its own fonts and sizing, so don't let prose restyle it. */
+.prose .katex {
+  font-size: 1.05em;
+  line-height: 1.2;
+}
+/* KaTeX draws \vec arrows (and \sqrt, \overrightarrow, …) as absolutely
+   positioned SVGs inside a zero-width accent span, and its own stylesheet
+   sets `display: block` on them. Preflight's `svg { display: block }` agrees,
+   so nothing needs correcting there — but overriding it to `inline` makes the
+   arrow fall back to an inline static position and land up-and-right of the
+   letter instead of centered above it. Leave `display` alone.
+
+   max-width/max-height are belt-and-braces: preflight caps `max-width: 100%`
+   on img/video only, not svg, but prose or a future preflight could. */
+.katex svg {
+  max-width: none;
+  max-height: none;
+}
+.katex .accent,
+.katex-html {
+  overflow: visible;
+}
+
+/* Model-written HTML in notes (rendered via rehype-raw). The assistant
+   reaches for Notion-style <aside> callouts, so give them a real callout
+   look instead of an unstyled block. */
+.prose aside {
+  margin: 1em 0;
+  border-left: 3px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--sidebar);
+  padding: 0.75rem 1rem;
+}
+/* The first/last child margins would otherwise push the callout open. */
+.prose aside > :first-child {
+  margin-top: 0;
+}
+.prose aside > :last-child {
+  margin-bottom: 0;
+}
+/* A heading inside a callout is a label, not a document section — don't let
+   it inherit the large heading scale. */
+.prose aside :is(h1, h2, h3, h4, h5, h6) {
+  margin-top: 0;
+  font-size: 1em;
+}
+.prose details {
+  margin: 1em 0;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem;
+}
+.prose summary {
+  cursor: pointer;
+  font-weight: 500;
+}
+.prose mark {
+  border-radius: 0.25rem;
+  background: var(--sidebar-accent);
+  padding: 0 0.2em;
+  color: inherit;
+}
+.prose kbd {
+  border: 1px solid var(--border);
+  border-radius: 0.25rem;
+  background: var(--sidebar);
+  padding: 0.1em 0.35em;
+  font-size: 0.9em;
+}
+.prose figure {
+  margin: 1em 0;
+}
+.prose figcaption {
+  color: var(--muted);
+  font-size: 0.9em;
+}

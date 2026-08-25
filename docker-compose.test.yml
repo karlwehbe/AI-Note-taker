@@ -1,0 +1,66 @@
+# System/acceptance-test stack. Layered on top of docker-compose.yml:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.test.yml \
+#       up -d --build api-test llm-stub
+#
+# It adds two NEW services rather than overriding `api`. That matters: a
+# compose file can only have one container per service name, so overriding
+# `api` would *replace* your dev API instead of running alongside it — and
+# because Compose appends to sequences when merging, an overridden `ports:`
+# also publishes both 8000 and 8001. Either way the browser app on 8000
+# silently ends up on the test database, which looks exactly like data loss.
+#
+# With a separate service, both run at once:
+#   localhost:8000  dev API, real OpenAI, your real notes
+#   localhost:8001  test API, stubbed model, throwaway database
+#
+# Two things differ from development, both deliberate:
+#
+#   1. Its own database (ai_note_taker_system), so tests never read or write
+#      your dev data.
+#   2. OPENAI_BASE_URL points at a local stub. The openai SDK reads that
+#      variable itself, so nothing in app/ knows the difference — and the
+#      suite costs nothing and never flakes on sampling.
+#
+# Deepgram is NOT redirected: its URL is a module constant in
+# transcription.py rather than a setting, so the audio-upload path can't be
+# faked this way. System coverage stops at the text path; audio is covered by
+# the integration layer, which stubs transcribe_audio directly.
+services:
+  llm-stub:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # Reuses the API image (it already has FastAPI and uvicorn) and mounts the
+    # stub in, so no separate image has to be built or kept in sync.
+    volumes:
+      - ./server/tests/system:/stub:ro
+    working_dir: /stub
+    command: ["uvicorn", "llm_stub:app", "--host", "0.0.0.0", "--port", "9000"]
+    ports:
+      - "9000:9000"
+
+  api-test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8000"
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@db:5432/ai_note_taker_system
+      # 5174 is the dev server Playwright starts for acceptance runs; 5173 is
+      # kept so the stack can also be driven by hand from the normal client.
+      CORS_ORIGINS: http://localhost:5174,http://localhost:5173
+      OPENAI_BASE_URL: http://llm-stub:9000/v1
+      # init_chat_model refuses to build a client without a key; the stub
+      # never checks it.
+      OPENAI_API_KEY: stub-key-not-real
+      DEEPGRAM_API_KEY: stub-key-not-real
+      LLM_MODEL: openai:gpt-4o-mini
+      ROUTING_LLM_MODEL: openai:gpt-4o-mini
+      ENVIRONMENT: development
+    depends_on:
+      db:
+        condition: service_healthy
+      llm-stub:
+        condition: service_started

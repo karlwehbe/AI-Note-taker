@@ -1,0 +1,231 @@
+import logging
+import uuid
+from datetime import UTC, datetime
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.config import Settings, get_settings
+from app.db import get_db
+from app.models import Conversation, Message
+from app.services.notes_graph import generate_response
+from app.services.transcription import transcribe_audio
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(tags=["conversations"])
+
+MAX_AUDIO_BYTES = 25 * 1024 * 1024  # Deepgram's own upload limit
+TITLE_MAX_LEN = 60
+
+
+class MessageOut(BaseModel):
+    id: uuid.UUID
+    role: str
+    content: str
+    filename: str | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ConversationOut(BaseModel):
+    id: uuid.UUID
+    title: str
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ConversationDetailOut(ConversationOut):
+    messages: list[MessageOut]
+    note_content: str | None
+    draft_transcript: str | None
+
+
+class MessageTurnOut(BaseModel):
+    user_message: MessageOut
+    assistant_message: MessageOut
+    note_content: str | None
+    title: str
+
+
+def _get_conversation_or_404(conversation_id: uuid.UUID, db: Session) -> Conversation:
+    conversation = db.get(Conversation, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+    return conversation
+
+
+@router.post("/conversations", response_model=ConversationOut)
+def create_conversation(db: Session = Depends(get_db)) -> Conversation:
+    conversation = Conversation()
+    db.add(conversation)
+    db.commit()
+    db.refresh(conversation)
+    logger.info("[%s] conversation created", conversation.id)
+    return conversation
+
+
+@router.get("/conversations", response_model=list[ConversationOut])
+def list_conversations(db: Session = Depends(get_db)) -> list[Conversation]:
+    stmt = select(Conversation).order_by(Conversation.updated_at.desc())
+    return list(db.scalars(stmt))
+
+
+@router.get("/conversations/{conversation_id}", response_model=ConversationDetailOut)
+def get_conversation(conversation_id: uuid.UUID, db: Session = Depends(get_db)) -> Conversation:
+    return _get_conversation_or_404(conversation_id, db)
+
+
+@router.delete("/conversations/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_conversation(conversation_id: uuid.UUID, db: Session = Depends(get_db)) -> None:
+    conversation = _get_conversation_or_404(conversation_id, db)
+    db.delete(conversation)
+    db.commit()
+    logger.info("[%s] conversation deleted", conversation_id)
+
+
+class DraftIn(BaseModel):
+    transcript: str
+
+
+# Called periodically by the client while a recording is in progress, so the
+# transcript captured so far survives a crash/reload even before the user
+# gets to Send — overwrites draft_transcript wholesale each time rather than
+# appending, since the client always sends the full accumulated transcript.
+@router.patch("/conversations/{conversation_id}/draft", status_code=status.HTTP_204_NO_CONTENT)
+def save_draft(conversation_id: uuid.UUID, payload: DraftIn, db: Session = Depends(get_db)) -> None:
+    conversation = _get_conversation_or_404(conversation_id, db)
+    conversation.draft_transcript = payload.transcript
+    db.commit()
+    # DEBUG, not INFO — this fires every few seconds for the whole duration
+    # of a recording and would otherwise drown out the rest of the workflow.
+    logger.debug("[%s] draft autosaved (%d chars)", conversation_id, len(payload.transcript))
+
+
+@router.post("/conversations/{conversation_id}/messages", response_model=MessageTurnOut)
+async def send_message(
+    conversation_id: uuid.UUID,
+    # Audio is optional — omitted entirely for a typed text message.
+    file: UploadFile | None = File(None),
+    # For audio: set by the client when it was already transcribed live via
+    # the /ws/transcribe Deepgram streaming proxy, skipping a redundant
+    # batch transcription call. For a typed message (no file), this IS the
+    # message content directly — nothing gets transcribed.
+    transcript: str | None = Form(None),
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+) -> MessageTurnOut:
+    conversation = _get_conversation_or_404(conversation_id, db)
+    logger.info(
+        "[%s] message received (%s)",
+        conversation_id,
+        f"audio file {file.filename!r}" if file is not None else "text",
+    )
+
+    filename: str | None = None
+    if file is not None:
+        audio_bytes = await file.read()
+        if not audio_bytes:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty file")
+        if len(audio_bytes) > MAX_AUDIO_BYTES:
+            raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="File too large")
+        if transcript is None:
+            logger.info("[%s] transcribing %d bytes of audio", conversation_id, len(audio_bytes))
+            transcript = await transcribe_audio(audio_bytes, settings)
+            logger.info("[%s] transcription complete (%d chars)", conversation_id, len(transcript))
+        else:
+            logger.info("[%s] using transcript already captured live (%d chars)", conversation_id, len(transcript))
+        filename = file.filename or "recording.webm"
+    elif not transcript:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Either file or transcript is required")
+
+    # Silence (or a file with no discernible speech) transcribes to an empty
+    # string — bail before persisting anything, so the conversation keeps its
+    # default "New conversation" title instead of it being overwritten below,
+    # and no blank message is saved.
+    if not transcript.strip():
+        logger.info("[%s] no speech detected, rejecting", conversation_id)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No speech detected in the recording — try again.",
+        )
+
+    history = [{"role": m.role, "content": m.content} for m in conversation.messages]
+
+    user_message = Message(
+        conversation_id=conversation.id,
+        role="user",
+        content=transcript,
+        filename=filename,
+    )
+    db.add(user_message)
+    # Persist the user turn immediately so a crash mid-generation doesn't lose
+    # what they sent. Cleared again below if the model call fails, so a soft
+    # failure can restore the text into the composer for a clean retry.
+    conversation.draft_transcript = None
+    conversation.updated_at = datetime.now(UTC)
+    db.commit()
+    db.refresh(user_message)
+    logger.info("[%s] user message saved (%d chars)", conversation_id, len(transcript))
+
+    logger.info(
+        "[%s] generating response (llm=%s, routing=%s, %d prior turns)",
+        conversation_id,
+        settings.llm_model,
+        settings.routing_llm_model,
+        len(history),
+    )
+    try:
+        turn = await generate_response(
+            transcript, history, conversation.note_content, conversation.title, settings, db
+        )
+    except HTTPException:
+        db.delete(user_message)
+        db.commit()
+        raise
+    except Exception:
+        logger.exception("[%s] response generation failed", conversation_id)
+        db.delete(user_message)
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Couldn't generate a response — try again.",
+        ) from None
+
+    logger.info(
+        "[%s] response generated (notes_updated=%s, reply %d chars) — %s",
+        conversation_id,
+        turn.notes_updated,
+        len(turn.chat_reply),
+        turn.decision_reason,
+    )
+    assistant_message = Message(conversation_id=conversation.id, role="assistant", content=turn.chat_reply)
+    db.add(assistant_message)
+
+    # Only persist notes when the graph actually routed through its
+    # note-writing branch — a chat-only turn must leave the document exactly
+    # as it was.
+    if turn.notes_updated and turn.note_content is not None:
+        conversation.note_content = turn.note_content
+    if conversation.title == "New conversation" and turn.title.strip():
+        conversation.title = turn.title.strip()[:TITLE_MAX_LEN]
+    conversation.updated_at = datetime.now(UTC)
+
+    db.commit()
+    db.refresh(user_message)
+    db.refresh(assistant_message)
+    db.refresh(conversation)
+    logger.info("[%s] message saved (title=%r)", conversation_id, conversation.title)
+    return MessageTurnOut(
+        user_message=MessageOut.model_validate(user_message),
+        assistant_message=MessageOut.model_validate(assistant_message),
+        # Always the stored document, so a chat-only turn doesn't blank the
+        # notes panel client-side.
+        note_content=conversation.note_content,
+        title=conversation.title,
+    )

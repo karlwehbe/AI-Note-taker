@@ -1,0 +1,56 @@
+# Local development stack — Postgres (with pgvector), the API server, and the
+# background worker — so a developer can bring up the whole backend with one
+# command instead of installing Postgres/pgvector locally and running services
+# by hand. "db" runs Postgres and gates the other two services on its
+# healthcheck; "api" and "worker" both build from the same root Dockerfile but
+# run different commands. This is the day-to-day dev database — safe to wipe
+# and reset freely (docker compose down -v, or ./setup.sh --reset).
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ai_note_taker
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ai_note_taker"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@db:5432/ai_note_taker
+      CORS_ORIGINS: http://localhost:5173
+      DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-openai:gpt-5.6-luna}
+      ROUTING_LLM_MODEL: ${ROUTING_LLM_MODEL:-openai:gpt-5.4-nano}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ENVIRONMENT: development
+    depends_on:
+      db:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "app.worker"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@db:5432/ai_note_taker
+      ENVIRONMENT: development
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

@@ -1,0 +1,11 @@
+{
+  // Config for Oxlint, the linter that npm run lint runs over the client code.
+  // Turns on the react/typescript/oxc rule sets, and enforces React's hooks
+  // rules as an error since breaking those causes real runtime bugs.
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["react", "typescript", "oxc"],
+  "rules": {
+    "react/rules-of-hooks": "error",
+    "react/only-export-components": ["warn", { "allowConstantExport": true }]
+  }
+}
